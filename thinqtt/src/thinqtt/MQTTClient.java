@@ -5,6 +5,7 @@ import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
 import java.net.UnknownHostException;
@@ -20,7 +21,7 @@ import javax.net.SocketFactory;
 
 public class MQTTClient extends MQTTDecoderListener {
 	private static final int READ_LOOP_INTERVAL = 250;
-	private static final int DEFAULT_BUFFER_SIZE = 65536;
+	private static final int DEFAULT_BUFFER_SIZE = 512 * 1024;
 	public static final String[] CONNECTION_ERRMSG = new String[] {
 			"Connection Refused: unacceptable protocol version",
 			"Connection Refused: identifier rejected",
@@ -151,8 +152,10 @@ public class MQTTClient extends MQTTDecoderListener {
 		this.keepAlive = Integer.parseInt(connectionProperties.getProperty(
 				"keepAliveSecs", "60")) * 1000;
 
-		socket = SocketFactory.getDefault().createSocket(host, port);
+		socket = SocketFactory.getDefault().createSocket();
 		socket.setReceiveBufferSize(DEFAULT_BUFFER_SIZE);
+		socket.connect(new InetSocketAddress(host, port));
+		
 		InputStream in = new BufferedInputStream(socket.getInputStream());
 		OutputStream out = new BufferedOutputStream(socket.getOutputStream());
 		this.decoder = new MQTTDecoder(in, workQ, this);
