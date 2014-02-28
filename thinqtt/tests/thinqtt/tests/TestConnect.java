@@ -1,4 +1,4 @@
-package mqttclient.tests;
+package thinqtt.tests;
 
 import static org.junit.Assert.*;
 
@@ -58,7 +58,7 @@ public class TestConnect {
 		};
 
 		final MQTTClient client = new MQTTClient("localhost", 1883, null,
-				listener, null);
+				null, listener);
 		try {
 			// Properties p = new Properties();
 			// p.setProperty("keepAliveSecs", "10");

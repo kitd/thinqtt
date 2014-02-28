@@ -19,14 +19,26 @@ public class MQTTMessage {
 	public static final int DISCONNECT 	= 14;
 	public static final int RESERVED15 	= 15;
 	
+	private final int type;
 	private final int id;
+	private final int qos;
 	private final String topic;
 	private final byte[] msg;
 	
-	public MQTTMessage(int id, String topic, byte[] msg) {
+	public MQTTMessage(int type, int id, int qos, String topic, byte[] msg) {
+		this.type = type;
 		this.id = id;
+		this.qos = qos;
 		this.topic = topic;
 		this.msg = msg;
+	}
+
+	public int getQos() {
+		return qos;
+	}
+
+	public int getType() {
+		return type;
 	}
 
 	public int getId() {

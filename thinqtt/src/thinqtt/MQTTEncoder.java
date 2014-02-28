@@ -22,7 +22,7 @@ public class MQTTEncoder {
 			String lwtTopic, String lwtMsg, int lwtQos, boolean lwtRetain,
 			boolean cleanSession, int keepAliveSecs) throws IOException {
 
-		ByteArrayOutputStream payload = new ByteArrayOutputStream(256);
+		ByteArrayOutputStream payload = new ByteArrayOutputStream();
 		DataOutputStream dos2 = new DataOutputStream(payload);
 		dos2.writeUTF("MQIsdp");
 		dos2.writeByte(3);
@@ -53,32 +53,32 @@ public class MQTTEncoder {
 
 	private void writeFixedHeader(DataOutputStream dos, int messageType,
 			boolean dup, int qos, boolean retain) throws IOException {
-		dos.writeByte((messageType << 4) | (dup ? 0x08 : 0x00) | (qos << 1)
-				| (retain ? 0x01 : 0x00));
+		int fixedHeader = (messageType << 4) | (dup ? 0x08 : 0x00) | (qos << 1)
+				| (retain ? 0x01 : 0x00); 
+		dos.writeByte(fixedHeader);
 	}
 
 	private void writeRemainingLength(DataOutputStream dos, int len)
 			throws IOException {
 		// ALGORITHM FOR ENCODING REMAINING LENGTH
 		// do
-		// digit = X MOD 128
-		// X = X DIV 128
-		// // if there are more digits to encode, set the top bit of this digit
-		// if ( X > 0 )
-		// digit = digit OR 0x80
-		// endif
-		// 'output' digit
+		// 	digit = X MOD 128
+		// 	X = X DIV 128
+		// 	// if there are more digits to encode, set the top bit of this digit
+		// 	if ( X > 0 )
+		// 		digit = digit OR 0x80
+		// 	endif
+		// 	'output' digit
 		// while ( X> 0 )
 		int x = len;
 		do {
 			int digit = x % 128;
 			x /= 128;
 			if (x > 0) {
-				digit |= 0x80;
+				digit |= 0x0080;
 			}
-			dos.writeByte(digit);
+			dos.write(digit);
 		} while (x > 0);
-
 	}
 
 	public void writeDisconnect() throws IOException {
@@ -89,7 +89,7 @@ public class MQTTEncoder {
 
 	public void writeSubscribe(int msgId, String topicPattern, int qos)
 			throws IOException {
-		ByteArrayOutputStream payload = new ByteArrayOutputStream(256);
+		ByteArrayOutputStream payload = new ByteArrayOutputStream();
 		DataOutputStream dos2 = new DataOutputStream(payload);
 		dos2.writeShort(msgId);
 		dos2.writeUTF(topicPattern);
@@ -131,7 +131,7 @@ public class MQTTEncoder {
 
 	public void writePublish(String topic, byte[] message, int msgId, int qos)
 			throws IOException {
-		ByteArrayOutputStream payload = new ByteArrayOutputStream(256);
+		ByteArrayOutputStream payload = new ByteArrayOutputStream();
 		DataOutputStream dos2 = new DataOutputStream(payload);
 		dos2.writeUTF(topic);
 		if (qos > 0) {

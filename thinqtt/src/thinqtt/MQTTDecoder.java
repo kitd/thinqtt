@@ -9,24 +9,27 @@ import java.util.Collection;
 import java.util.concurrent.Executor;
 
 public class MQTTDecoder {
-	private final DataInputStream dis;
+	private final InputStream is;
 	private final Executor exec;
 	private final MQTTDecoderListener listener;
 
-	public MQTTDecoder(InputStream is, Executor exec,
-			MQTTDecoderListener listener) {
-		this.dis = new DataInputStream(is);
+	public MQTTDecoder(InputStream is, Executor exec, MQTTDecoderListener listener) {
+		this.is = is;
 		this.exec = exec;
 		this.listener = listener;
 	}
+	
+	public boolean canDecode() {
+		try {
+			return this.is.available() > 0;
+		} catch (IOException e) {
+			return false;
+		}
+	}
 
 	public void decode() throws IOException {
-		int fixedHeader = dis.read();
-
-		final int messageType = (fixedHeader & 0xF0) >> 4;
-		final boolean dup = (fixedHeader & 0x08) != 0;
-		final int qos = (fixedHeader & 0x04) >> 1;
-		final boolean retain = (fixedHeader & 0x01) != 0;
+		
+		final int fixedHeader = is.read();
 
 		// ALGORITHM FOR DECODING REMAINING LENGTH (from MQTT spec)
 		// multiplier = 1
@@ -41,18 +44,23 @@ public class MQTTDecoder {
 		int multiplier = 1;
 		int digit;
 		do {
-			digit = dis.read();
-			remainingLength += (digit & 0x7F) * multiplier;
+			digit = is.read();
+			remainingLength += (digit & 0x007F) * multiplier;
 			multiplier *= 128;
-		} while ((digit & 0x80) != 0);
+		} while ((digit & 0x0080) != 0);
 
 		final byte[] remainder = new byte[remainingLength];
-		dis.read(remainder);
+		is.read(remainder);
 
 		exec.execute(new Runnable() {
 
 			@Override
 			public void run() {
+				int messageType = (fixedHeader & 0xF0) >> 4;
+				boolean dup = (fixedHeader & 0x08) != 0;
+				int qos = (fixedHeader & 0x04) >> 1;
+				boolean retain = (fixedHeader & 0x01) != 0;
+
 				DataInputStream dis = new DataInputStream(
 						new ByteArrayInputStream(remainder));
 
@@ -102,8 +110,7 @@ public class MQTTDecoder {
 						break;
 					default:
 						dis.close();
-						throw new MQTTClientException("unknown message type: "
-								+ messageType);
+						throw new MQTTClientException("unknown message type: " + messageType);
 					}
 				} catch (IOException e) {
 					e.printStackTrace();

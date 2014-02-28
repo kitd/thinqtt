@@ -6,20 +6,21 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.util.Properties;
 import java.util.Random;
-import java.util.Timer;
-import java.util.TimerTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.net.SocketFactory;
 
 public class MQTTClient extends MQTTDecoderListener {
-	private static final int READ_LOOP_INTERVAL = 200;
-	private static final int DEFAULT_BUFFER_SIZE = 256;
+	private static final int READ_LOOP_INTERVAL = 250;
+	private static final int DEFAULT_BUFFER_SIZE = 65536;
 	public static final String[] CONNECTION_ERRMSG = new String[] {
 			"Connection Refused: unacceptable protocol version",
 			"Connection Refused: identifier rejected",
@@ -35,65 +36,76 @@ public class MQTTClient extends MQTTDecoderListener {
 	private final String clientId;
 
 	private final MQTTCallback cb;
-	private final Timer scheduler = new Timer();
-	private final ExecutorService wipQ;
+	private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+	private final ExecutorService workQ;
 	private final ExecutorService writeQ = Executors.newSingleThreadExecutor();
 	private final MQTTMessageStore store = new MQTTMessageStore();
 
 	private Socket socket;
-	private InputStream in = null;
-	private OutputStream out = null;
 	private MQTTDecoder decoder;
 	private MQTTEncoder encoder;
-	private int keepAlive;
+	private long keepAlive;
 	private boolean connected = false;
 	private boolean active = false;
+	private long lastActivityCheck;
 	private boolean pinging = false;
-	private boolean publishOnRelease = true;
 	private final AtomicInteger msgId = new AtomicInteger(0);
+	private final AtomicBoolean running = new AtomicBoolean(true);
 	// private MQTTMessage retainedMsg = null;
 
-	private final TimerTask readLoop = new TimerTask() {
+	private final Runnable readLoop = new Runnable() {
 		@Override
 		public void run() {
-			try {
-				while (in.available() > 0) {
-					decoder.decode();
+			while (running.get()) {
+				try {
+					while (decoder.canDecode()) {
+						decoder.decode();
+					}
+					
+					pingLoop.run();
+					
+					Thread.sleep(READ_LOOP_INTERVAL);
+				} catch (SocketException se) {
+					checkConnection();
+				} catch (IOException e) {
+					cb.errorOccurred(e);
+					checkConnection();
+				} catch (InterruptedException e) {
 				}
-			} catch (IOException e) {
-				cb.errorOccurred(e);
-				checkConnection();
 			}
 		}
 	};
 
-	private final TimerTask pingCheck = new TimerTask() {
+	private final Runnable pingLoop = new Runnable() {
 		@Override
 		public void run() {
-			if (!active) {
-				// If we are already pinging, we haven't had a 
-				// reply from the previous ping, so something's
-				// wrong.
-				if (pinging) {
-					connected = false;
-					cb.connectionLost();
-				} else {
-					// If we get here, we are inactive and we
-					// need to ping.
-					pinging = true;
-					writeQ.submit(doPing());
+			long now = System.currentTimeMillis(); 
+			if (now - lastActivityCheck > keepAlive) {
+				// Time for an activity check
+				if (!active) {
+					// If we are already pinging, we haven't had a 
+					// reply from the previous ping, so something's
+					// wrong.
+					if (pinging) {
+						checkConnection();
+					} else {
+						// If we get here, we are inactive and we
+						// need to ping.
+						pinging = true;
+						writeQ.submit(doPing());
+					}
 				}
+				lastActivityCheck = now;
+				active = false;
 			}
-			active = false;
 		}
 	};
-
+	
 	/**
 	 * Public API methods
 	 */
 
-	public MQTTClient(String host, int port, String clientId,
-			MQTTCallback listener, ExecutorService async) {
+	public MQTTClient(String host, int port, String clientId, ExecutorService async, MQTTCallback listener) {
 		if (host == null || host.trim().length() == 0)
 			throw new IllegalArgumentException(
 					"Host name cannot be null or empty.");
@@ -114,8 +126,7 @@ public class MQTTClient extends MQTTDecoderListener {
 			throw new IllegalArgumentException("Listener cannot be null.");
 		this.cb = listener;
 
-		this.wipQ = async != null ? async : Executors
-				.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+		this.workQ = async != null ? async : Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
 
 	}
 
@@ -125,6 +136,7 @@ public class MQTTClient extends MQTTDecoderListener {
 
 	public void connect(Properties connectionProperties)
 			throws UnknownHostException, IOException {
+		
 		String user = connectionProperties.getProperty("user");
 		String password = connectionProperties.getProperty("password");
 		String lwtTopic = connectionProperties.getProperty("lwtTopic");
@@ -136,35 +148,30 @@ public class MQTTClient extends MQTTDecoderListener {
 				.getProperty("lwtRetain", "False"));
 		boolean cleanSession = Boolean.parseBoolean(connectionProperties
 				.getProperty("cleanSession", "False"));
-		this.publishOnRelease = Boolean.parseBoolean(connectionProperties
-				.getProperty("publishOnRelease", "true"));
 		this.keepAlive = Integer.parseInt(connectionProperties.getProperty(
-				"keepAliveSecs", "60"));
+				"keepAliveSecs", "60")) * 1000;
 
 		socket = SocketFactory.getDefault().createSocket(host, port);
-		in = new BufferedInputStream(socket.getInputStream(),
-				DEFAULT_BUFFER_SIZE);
-		out = new BufferedOutputStream(socket.getOutputStream(),
-				DEFAULT_BUFFER_SIZE);
-		this.decoder = new MQTTDecoder(in, wipQ, this);
+		socket.setReceiveBufferSize(DEFAULT_BUFFER_SIZE);
+		InputStream in = new BufferedInputStream(socket.getInputStream());
+		OutputStream out = new BufferedOutputStream(socket.getOutputStream());
+		this.decoder = new MQTTDecoder(in, workQ, this);
 		this.encoder = new MQTTEncoder(out);
 
 		writeQ.submit(doConnect(user, password, lwtTopic, lwtMsg, lwtQos,
 				lwtRetain, cleanSession));
 
-		scheduler.schedule(readLoop, READ_LOOP_INTERVAL, READ_LOOP_INTERVAL);
-		// Ping loop will run every (keepAlive/2) seconds to avoid worst cases
-		// where last activity is just after a ping check, and it therefore 
-		// takes you nearly 2 pings to detect.
-		scheduler.scheduleAtFixedRate(pingCheck, keepAlive*500, keepAlive*500);
-		recordActivity();
+		running.set(true);
+		new Thread(readLoop).start();
+		lastActivityCheck = System.currentTimeMillis();
+//		scheduler.scheduleWithFixedDelay(pingLoop, 10, 10, TimeUnit.SECONDS);
 	}
 
 	public void disconnect() {
 		if (connected) {
-			readLoop.cancel();
-			scheduler.purge();
-			wipQ.shutdown();
+			running.set(false);
+			scheduler.shutdown();
+			workQ.shutdown();
 			writeQ.submit(doDisconnect());
 			recordActivity();
 		}
@@ -173,7 +180,7 @@ public class MQTTClient extends MQTTDecoderListener {
 	public void subscribe(final String topicPattern, final int qos)
 			throws IOException {
 		int msgId = nextMessageId();
-		store.put(msgId, topicPattern, null);
+		store.put(MQTTMessage.SUBSCRIBE, msgId, qos, topicPattern, null);
 		writeQ.submit(doSubscribe(topicPattern, qos, msgId));
 		recordActivity();
 	}
@@ -183,7 +190,7 @@ public class MQTTClient extends MQTTDecoderListener {
 		int msgId = qos > 0 ? nextMessageId() : 0;
 
 		if (qos > 0) {
-			store.put(msgId, topic, message);
+			store.put(MQTTMessage.PUBLISH, msgId, qos, topic, message);
 		}
 
 		writeQ.submit(doPublish(topic, message, qos, msgId));
@@ -242,7 +249,6 @@ public class MQTTClient extends MQTTDecoderListener {
 
 	@Override
 	protected void onPingResp() {
-		active = false;
 		connected = true;
 		recordActivity();
 	}
@@ -267,19 +273,14 @@ public class MQTTClient extends MQTTDecoderListener {
 			cb.messageArrived(topic, payload);
 			break;
 		case 1:
-			store.put(messageId, topic, payload);
+			store.put(MQTTMessage.PUBACK, messageId, qos, topic, payload);
 			cb.messageArrived(topic, payload);
 			writeQ.submit(doPubAck(messageId));
 			store.delete(messageId);
 			break;
 		case 2:
-			if (!store.contains(messageId)) {
-				store.put(messageId, topic, payload);
-				if (!publishOnRelease) {
-					cb.messageArrived(topic, payload);
-				}
-				writeQ.submit(doPubRec(messageId));
-			}
+			store.put(MQTTMessage.PUBREC, messageId, qos, topic, payload);
+			writeQ.submit(doPubRec(messageId));
 			break;
 		default:
 			cb.errorOccurred(new MQTTClientException(MQTT_INVALID_QOS + qos));
@@ -310,9 +311,7 @@ public class MQTTClient extends MQTTDecoderListener {
 	protected void onPubRel(final int messageId, boolean dup) {
 		if (store.contains(messageId)) {
 			MQTTMessage msg = store.get(messageId);
-			if (publishOnRelease) {
-				cb.messageArrived(msg.getTopic(), msg.getMsg());
-			}
+			cb.messageArrived(msg.getTopic(), msg.getMsg());
 			writeQ.submit(doPubComp(messageId));
 			store.delete(messageId);
 		}
@@ -334,7 +333,7 @@ public class MQTTClient extends MQTTDecoderListener {
 			public void run() {
 				try {
 					encoder.writeConnect(clientId, user, password, lwtTopic,
-							lwtMsg, lwtQos, lwtRetain, cleanSession, keepAlive);
+							lwtMsg, lwtQos, lwtRetain, cleanSession, (int) (keepAlive/1000));
 				} catch (IOException e) {
 					cb.errorOccurred(e);
 					checkConnection();
