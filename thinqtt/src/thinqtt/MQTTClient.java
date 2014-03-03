@@ -11,17 +11,20 @@ import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.util.Properties;
 import java.util.Random;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import javax.net.SocketFactory;
 
 public class MQTTClient extends MQTTDecoderListener {
-	private static final int READ_LOOP_INTERVAL = 250;
 	private static final int DEFAULT_BUFFER_SIZE = 512 * 1024;
+	
 	public static final String[] CONNECTION_ERRMSG = new String[] {
 			"Connection Refused: unacceptable protocol version",
 			"Connection Refused: identifier rejected",
@@ -31,82 +34,70 @@ public class MQTTClient extends MQTTDecoderListener {
 			"Connection Refused: unknown reason code " };
 	public static final String MQTT_INVALID_QOS = "Unknown QoS code ";
 	private static final String ALPHANUM_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+	
+	private static Logger log = Logger.getLogger(MQTTClient.class.getName());
 
-	private final String host;
-	private final int port;
-	private final String clientId;
-
-	private final MQTTCallback cb;
-	private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-	private final ExecutorService workQ;
-	private final ExecutorService writeQ = Executors.newSingleThreadExecutor();
-	private final MQTTMessageStore store = new MQTTMessageStore();
-
-	private Socket socket;
-	private MQTTDecoder decoder;
-	private MQTTEncoder encoder;
-	private long keepAlive;
-	private boolean connected = false;
-	private boolean active = false;
-	private long lastActivityCheck;
-	private boolean pinging = false;
-	private final AtomicInteger msgId = new AtomicInteger(0);
-	private final AtomicBoolean running = new AtomicBoolean(true);
-	// private MQTTMessage retainedMsg = null;
-
-	private final Runnable readLoop = new Runnable() {
+	private final 	String 			host;
+	private final 	int 			port;
+	private final 	String 			clientId;
+	private final 	MQTTCallback 	cb;
+	private final 	MQTTMessageStore store = new MQTTMessageStore();
+	private 		Socket 			socket;
+	private 		MQTTDecoder 	decoder;
+	private 		MQTTEncoder 	encoder;
+	private 		long		 	keepAlive;
+	private 		boolean 		active = false;
+	private 		long 			lastActivityCheck;
+	private final	AtomicInteger 	msgId = new AtomicInteger(0);
+	private final	AtomicBoolean	isRunning = new AtomicBoolean(false);
+	private final   Timer			pinger = new Timer();
+	private final 	ExecutorService workQ;
+	private final 	ExecutorService writeQ = Executors.newSingleThreadExecutor();
+	
+	private final 	Thread readLoop = new Thread(new Runnable() {
 		@Override
 		public void run() {
-			while (running.get()) {
+			while (isRunning.get()) {
 				try {
-					while (decoder.canDecode()) {
-						decoder.decode();
-					}
-					
-					pingLoop.run();
-					
-					Thread.sleep(READ_LOOP_INTERVAL);
+					decoder.decode();
 				} catch (SocketException se) {
-					checkConnection();
-				} catch (IOException e) {
+					if (!isNetworkConnected()) {
+						break;
+					}
+				} catch (Exception e) {
 					cb.errorOccurred(e);
-					checkConnection();
-				} catch (InterruptedException e) {
+					if (!checkConnection()) {
+						break;
+					}
 				}
 			}
 		}
-	};
-
-	private final Runnable pingLoop = new Runnable() {
+	});
+	
+	private final TimerTask pingCheck = new TimerTask() {
 		@Override
 		public void run() {
 			long now = System.currentTimeMillis(); 
 			if (now - lastActivityCheck > keepAlive) {
-				// Time for an activity check
-				if (!active) {
-					// If we are already pinging, we haven't had a 
-					// reply from the previous ping, so something's
-					// wrong.
-					if (pinging) {
-						checkConnection();
-					} else {
-						// If we get here, we are inactive and we
-						// need to ping.
-						pinging = true;
-						writeQ.submit(doPing());
-					}
+				// Time to check for activity
+				if (!active && checkConnection()) {
+					writeQ.submit(doPing());
 				}
 				lastActivityCheck = now;
 				active = false;
 			}
 		}
 	};
-	
+
 	/**
 	 * Public API methods
 	 */
 
 	public MQTTClient(String host, int port, String clientId, ExecutorService async, MQTTCallback listener) {
+		if (log.isLoggable(Level.FINER)) {
+			log.entering(getClass().getName(), "<INIT>", new Object[]{host, port, clientId, async, listener});
+		}
+		
 		if (host == null || host.trim().length() == 0)
 			throw new IllegalArgumentException(
 					"Host name cannot be null or empty.");
@@ -117,9 +108,8 @@ public class MQTTClient extends MQTTDecoderListener {
 					"Port cannot be >= 0 and <= 65535.");
 		this.port = port;
 
-		this.clientId = clientId == null ? generateRandomId() : clientId;
-		if (this.clientId.trim().length() == 0
-				|| this.clientId.trim().length() > 23)
+		this.clientId = clientId == null ? generateRandomId() : clientId.trim();
+		if (this.clientId.length() == 0	|| this.clientId.length() > 23)
 			throw new IllegalArgumentException(
 					"Client ID cannot be null, empty or more than 23 characters.");
 
@@ -127,8 +117,10 @@ public class MQTTClient extends MQTTDecoderListener {
 			throw new IllegalArgumentException("Listener cannot be null.");
 		this.cb = listener;
 
-		this.workQ = async != null ? async : Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+		this.workQ = async != null ? async : Executors.newFixedThreadPool(
+				Runtime.getRuntime().availableProcessors());
 
+		log.exiting(getClass().getName(), "<INIT>");
 	}
 
 	public void connect() throws UnknownHostException, IOException {
@@ -137,6 +129,9 @@ public class MQTTClient extends MQTTDecoderListener {
 
 	public void connect(Properties connectionProperties)
 			throws UnknownHostException, IOException {
+		if (log.isLoggable(Level.FINER)) {
+			log.entering(getClass().getName(), "connect", connectionProperties.toString());
+		}
 		
 		String user = connectionProperties.getProperty("user");
 		String password = connectionProperties.getProperty("password");
@@ -150,7 +145,7 @@ public class MQTTClient extends MQTTDecoderListener {
 		boolean cleanSession = Boolean.parseBoolean(connectionProperties
 				.getProperty("cleanSession", "False"));
 		this.keepAlive = Integer.parseInt(connectionProperties.getProperty(
-				"keepAliveSecs", "60")) * 1000;
+				"keepAliveSecs", "60")) * 1000; // KeepAlive stored as millis
 
 		socket = SocketFactory.getDefault().createSocket();
 		socket.setReceiveBufferSize(DEFAULT_BUFFER_SIZE);
@@ -164,16 +159,18 @@ public class MQTTClient extends MQTTDecoderListener {
 		writeQ.submit(doConnect(user, password, lwtTopic, lwtMsg, lwtQos,
 				lwtRetain, cleanSession));
 
-		running.set(true);
-		new Thread(readLoop).start();
 		lastActivityCheck = System.currentTimeMillis();
-//		scheduler.scheduleWithFixedDelay(pingLoop, 10, 10, TimeUnit.SECONDS);
+		isRunning.set(true);
+		readLoop.start();
+		pinger.schedule(pingCheck, 10000, 10000);
+		log.exiting(getClass().getName(), "connect");
 	}
 
 	public void disconnect() {
-		if (connected) {
-			running.set(false);
-			scheduler.shutdown();
+		if (isNetworkConnected()) {
+			isRunning.set(false);
+//			readLoop.interrupt();
+			pinger.cancel();
 			workQ.shutdown();
 			writeQ.submit(doDisconnect());
 			recordActivity();
@@ -218,10 +215,6 @@ public class MQTTClient extends MQTTDecoderListener {
 		return socket != null && !socket.isClosed();
 	}
 
-	public boolean isConnected() {
-		return connected;
-	}
-
 	public int getPendingMessageCount() {
 		return store.count();
 	}
@@ -237,7 +230,6 @@ public class MQTTClient extends MQTTDecoderListener {
 	protected void onConnAck(int responseCode) throws MQTTClientException {
 
 		if (responseCode == 0) {
-			connected = true;
 			cb.onConnected();
 			recordActivity();
 		}
@@ -252,7 +244,6 @@ public class MQTTClient extends MQTTDecoderListener {
 
 	@Override
 	protected void onPingResp() {
-		connected = true;
 		recordActivity();
 	}
 
@@ -351,9 +342,8 @@ public class MQTTClient extends MQTTDecoderListener {
 			public void run() {
 				try {
 					encoder.writeDisconnect();
-					connected = false;
-					socket.close();
 					writeQ.shutdown();
+					socket.close();
 				} catch (IOException e) {
 					cb.errorOccurred(e);
 					checkConnection();
@@ -448,10 +438,14 @@ public class MQTTClient extends MQTTDecoderListener {
 		};
 	}
 
-	private void checkConnection() {
-		connected = isNetworkConnected();
-		if (!connected) {
+	private boolean checkConnection() {
+		if (!isNetworkConnected()) {
 			cb.connectionLost();
+			return false;
+		}
+		
+		else {
+			return true;
 		}
 	}
 
