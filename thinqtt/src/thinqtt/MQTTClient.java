@@ -8,6 +8,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.util.Properties;
 import java.util.Random;
@@ -54,12 +55,14 @@ public class MQTTClient extends MQTTDecoderListener {
 	private final 	ExecutorService workQ;
 	private final 	ExecutorService writeQ = Executors.newSingleThreadExecutor();
 	
-	private final 	Thread readLoop = new Thread(new Runnable() {
+	private final 	Thread 			reader = new Thread(new Runnable() {
 		@Override
 		public void run() {
 			while (isRunning.get()) {
 				try {
 					decoder.decode();
+				} catch (SocketTimeoutException ste) {
+					continue;
 				} catch (SocketException se) {
 					if (!isNetworkConnected()) {
 						break;
@@ -74,21 +77,6 @@ public class MQTTClient extends MQTTDecoderListener {
 		}
 	});
 	
-	private final TimerTask pingCheck = new TimerTask() {
-		@Override
-		public void run() {
-			long now = System.currentTimeMillis(); 
-			if (now - lastActivityCheck > keepAlive) {
-				// Time to check for activity
-				if (!active && checkConnection()) {
-					writeQ.submit(doPing());
-				}
-				lastActivityCheck = now;
-				active = false;
-			}
-		}
-	};
-
 	/**
 	 * Public API methods
 	 */
@@ -149,6 +137,7 @@ public class MQTTClient extends MQTTDecoderListener {
 
 		socket = SocketFactory.getDefault().createSocket();
 		socket.setReceiveBufferSize(DEFAULT_BUFFER_SIZE);
+		socket.setSoTimeout(5000);
 		socket.connect(new InetSocketAddress(host, port));
 		
 		InputStream in = new BufferedInputStream(socket.getInputStream());
@@ -161,8 +150,13 @@ public class MQTTClient extends MQTTDecoderListener {
 
 		lastActivityCheck = System.currentTimeMillis();
 		isRunning.set(true);
-		readLoop.start();
-		pinger.schedule(pingCheck, 10000, 10000);
+		reader.start();
+		pinger.schedule(new TimerTask() {
+			@Override
+			public void run() {
+				checkActivity();
+			}
+		}, 10000, 10000);
 		log.exiting(getClass().getName(), "connect");
 	}
 
@@ -465,6 +459,18 @@ public class MQTTClient extends MQTTDecoderListener {
 					.charAt(r.nextInt(ALPHANUM_CHARS.length()));
 		}
 		return new String(result);
+	}
+
+	private void checkActivity() {
+		long now = System.currentTimeMillis(); 
+		if (now - lastActivityCheck > keepAlive) {
+			// Time to check for activity
+			if (!active && checkConnection()) {
+				writeQ.submit(doPing());
+			}
+			lastActivityCheck = now;
+			active = false;
+		}
 	}
 
 }

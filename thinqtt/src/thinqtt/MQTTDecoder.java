@@ -20,14 +20,6 @@ public class MQTTDecoder {
 		this.listener = listener;
 	}
 	
-	public boolean hasData() {
-		try {
-			return is.available() > 0;
-		} catch (IOException e) {
-			return false;
-		}
-	}
-
 	public void decode() throws IOException {
 		final int fixedHeader = is.read();
 		if (fixedHeader == -1) throw new SocketException();
