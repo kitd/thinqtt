@@ -263,8 +263,8 @@ public class MQTTClient extends MQTTDecoderListener {
 		case 1:
 			store.put(MQTTMessage.PUBACK, messageId, qos, topic, payload);
 			cb.messageArrived(topic, payload);
-			writeQ.submit(doPubAck(messageId));
 			store.delete(messageId);
+			writeQ.submit(doPubAck(messageId));
 			break;
 		case 2:
 			store.put(MQTTMessage.PUBREC, messageId, qos, topic, payload);
@@ -292,6 +292,15 @@ public class MQTTClient extends MQTTDecoderListener {
 	protected void onPubAck(int messageId) {
 		store.delete(messageId);
 		cb.publishComplete(messageId);
+		recordActivity();
+	}
+
+	@Override
+	protected void onPubRec(final int messageId) {
+		if (store.contains(messageId)) {
+			MQTTMessage msg = store.get(messageId);
+			writeQ.submit(doPubRel(messageId));
+		}
 		recordActivity();
 	}
 
@@ -396,6 +405,20 @@ public class MQTTClient extends MQTTDecoderListener {
 			public void run() {
 				try {
 					encoder.writePubRec(messageId);
+				} catch (IOException e) {
+					cb.errorOccurred(e);
+					checkConnection();
+				}
+			}
+		};
+	}
+
+	private Runnable doPubRel(final int messageId) {
+		return new Runnable() {
+			@Override
+			public void run() {
+				try {
+					encoder.writePubRel(messageId);
 				} catch (IOException e) {
 					cb.errorOccurred(e);
 					checkConnection();

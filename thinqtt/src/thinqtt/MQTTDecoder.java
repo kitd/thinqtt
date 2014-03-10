@@ -56,7 +56,7 @@ public class MQTTDecoder {
 			public void run() {
 				int messageType = (fixedHeader & 0xF0) >> 4;
 				boolean dup = (fixedHeader & 0x08) != 0;
-				int qos = (fixedHeader & 0x04) >> 1;
+				int qos = (fixedHeader & 0x06) >> 1;
 				boolean retain = (fixedHeader & 0x01) != 0;
 
 				try {
