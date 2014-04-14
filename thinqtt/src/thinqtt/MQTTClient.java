@@ -229,11 +229,11 @@ public class MQTTClient extends MQTTDecoderListener {
 
 	@Override
 	protected void onConnAck(int responseCode) throws MQTTClientException {
+		active = true;
 
 		if (responseCode == 0) {
 			mqttConnected = true;
 			cb.onConnected();
-			active = true;
 		}
 
 		else {
@@ -251,19 +251,21 @@ public class MQTTClient extends MQTTDecoderListener {
 
 	@Override
 	protected void onUnsubAck(int messageId) {
-		super.onUnsubAck(messageId);
 		active = true;
+		super.onUnsubAck(messageId);
 	}
 
 	@Override
 	protected void onSubAck(int messageId, byte[] qosList) {
-		store.delete(messageId);
 		active = true;
+		store.delete(messageId);
 	}
 
 	@Override
 	protected void onPublish(String topic, final int messageId, byte[] payload,
 			int qos, boolean retain, boolean dup) {
+		active = true;
+		
 		switch (qos) {
 		case 0:
 			cb.messageArrived(topic, payload);
@@ -285,42 +287,41 @@ public class MQTTClient extends MQTTDecoderListener {
 		// if (retain) {
 		// retainedMsg = new MQTTMessage(messageId, topic, payload);
 		// }
-		active = true;
 
 	}
 
 	@Override
 	protected void onPubComp(int messageId) {
+		active = true;
 		store.delete(messageId);
 		cb.publishComplete(messageId);
-		active = true;
 	}
 
 	@Override
 	protected void onPubAck(int messageId) {
+		active = true;
 		store.delete(messageId);
 		cb.publishComplete(messageId);
-		active = true;
 	}
 
 	@Override
 	protected void onPubRec(final int messageId) {
+		active = true;
 		if (store.contains(messageId)) {
 //			MQTTMessage msg = store.get(messageId);
 			writeQ.submit(doPubRel(messageId));
 		}
-		active = true;
 	}
 
 	@Override
 	protected void onPubRel(final int messageId, boolean dup) {
+		active = true;
 		if (store.contains(messageId)) {
 			MQTTMessage msg = store.get(messageId);
 			cb.messageArrived(msg.getTopic(), msg.getMsg());
 			writeQ.submit(doPubComp(messageId));
 			store.delete(messageId);
 		}
-		active = true;
 	}
 
 	/********************************************************
