@@ -28,9 +28,9 @@ public class MQTTDecoder {
 		// multiplier = 1
 		// value = 0
 		// do
-		// digit = 'next digit from stream'
-		// value += (digit AND 127) * multiplier
-		// multiplier *= 128
+		//   digit = 'next digit from stream'
+		//   value += (digit AND 127) * multiplier
+		//   multiplier *= 128
 		// while ((digit AND 128) != 0)
 
 		int remainingLength = 0;
