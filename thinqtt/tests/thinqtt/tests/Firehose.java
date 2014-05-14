@@ -4,6 +4,8 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import thinqtt.MQTTCallback;
 import thinqtt.MQTTClient;
@@ -23,7 +25,7 @@ public class Firehose {
 		String topic = "firehose";
 		boolean listener = false;
 		int qos = 0;
-		
+		int poolSize = 0;
 		int msgSize = 1024;
 		int msgRate = 1000;
 		int msgCount = 1000;
@@ -64,15 +66,19 @@ public class Firehose {
 				qos = Integer.parseInt(args[i+1]);
 				i++;
 			}
+			else if ("-z".equalsIgnoreCase(args[i])) {
+				poolSize = Integer.parseInt(args[i+1]);
+				i++;
+			}
 		}
 		
 		long time;
 		if (listener) {
-			time = listen(host, port, id, topic, msgCount, qos);
+			time = listen(host, port, id, topic, msgCount, qos, poolSize);
 		}
 		
 		else {
-			time = runTest(host, port, id, topic, msgSize, msgRate, msgCount, qos);
+			time = runTest(host, port, id, topic, msgSize, msgRate, msgCount, qos, poolSize);
 		}
 		
 		if (time > -1) {
@@ -81,14 +87,15 @@ public class Firehose {
 
 	}
 
-	private static long listen(String host, int port, String id, final String topic, int msgCount, final int qos) {
+	private static long listen(String host, int port, String id, final String topic, int msgCount, final int qos, int poolSize) {
 
 		final CountDownLatch latch = new CountDownLatch(1);
 		final long[] start = new long[1];
 		final long[] stop = new long[1];
 		final int stopId[] = new int[1];
+		ExecutorService ex = poolSize > 0 ? Executors.newFixedThreadPool(poolSize) : null;
 
-		client = new MQTTClient(host, port, id, null, new MQTTCallback() {
+		client = new MQTTClient(host, port, id, ex, new MQTTCallback() {
 
 			@Override
 			public void errorOccurred(Exception e) {
@@ -149,6 +156,9 @@ public class Firehose {
 			client.connect();
 			latch.await();
 			client.disconnect();
+			if (ex != null) {
+				ex.shutdown();
+			}
 		} catch (Exception e) {
 			e.printStackTrace();
 			return -1;
@@ -158,12 +168,13 @@ public class Firehose {
 	}
 
 	private static long runTest(String host, int port, String id,
-			final String topic, int msgSize, int msgRate, int msgCount, int qos) {
+			final String topic, int msgSize, int msgRate, int msgCount, int qos, int poolSize) {
 
 		final CountDownLatch latch = new CountDownLatch(1);
 		final int stopId[] = new int[1];
+		ExecutorService ex = poolSize > 0 ? Executors.newFixedThreadPool(poolSize) : null;
 		
-		client = new MQTTClient(host, port, id, null, new MQTTCallback() {
+		client = new MQTTClient(host, port, id, ex, new MQTTCallback() {
 
 			@Override
 			public void errorOccurred(Exception e) {
@@ -219,6 +230,9 @@ public class Firehose {
 			end = System.currentTimeMillis();
 			if (qos == 0) {
 				client.disconnect();
+			}
+			if (ex != null) {
+				ex.shutdown();
 			}
 			System.out.println(" done");
 		} catch (Exception e) {

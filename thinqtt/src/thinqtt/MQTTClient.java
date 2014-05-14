@@ -2,17 +2,17 @@ package thinqtt;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.util.Properties;
 import java.util.Random;
-import java.util.Timer;
-import java.util.TimerTask;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -23,6 +23,8 @@ import java.util.logging.Logger;
 import javax.net.SocketFactory;
 
 public class MQTTClient extends MQTTDecoderListener {
+	private static final int SOCKET_TIMEOUT = 5000;
+
 	private static final int DEFAULT_BUFFER_SIZE = 512 * 1024;
 	
 	public static final String[] CONNECTION_ERRMSG = new String[] {
@@ -43,49 +45,60 @@ public class MQTTClient extends MQTTDecoderListener {
 	private final 	MQTTCallback 	cb;
 	private final 	MQTTMessageStore store = new MQTTMessageStore();
 	private 		Socket 			socket;
-	private 		MQTTDecoder 	decoder;
-	private 		MQTTEncoder 	encoder;
+	private 		InputStream 	input;
+	private 		DataOutputStream output;
 	private 		long		 	keepAlive;
+	private 		long 			reconnectInterval;
+	private 		long 			reconnectIntervalInc;
+	private 		long 			reconnectIntervalMax;
 	private 		boolean 		active = false;
-	private 		boolean 		mqttConnected = false;
 	private 		long 			lastActivityCheck;
 	private final	AtomicInteger 	msgId = new AtomicInteger(0);
 	private final	AtomicBoolean	isRunning = new AtomicBoolean(false);
-	private final   Timer			pinger = new Timer();
-	private final 	ExecutorService readQ = Executors.newSingleThreadExecutor();
-	private final 	ExecutorService writeQ = Executors.newSingleThreadExecutor();
-	// workQ is a thread pool that handles decoding tasks. Calls to the callback will be 
-	// on one of these threads.
-	private final 	ExecutorService workQ;
+	private final	AtomicBoolean	socketOpen = new AtomicBoolean(false);
+	// workQ is a thread pool that handles decoding tasks. 
+	// Calls to the MQTTCallback will be made on one of these threads.
+	private final 	Executor 		workQ;
+	private 	 	ExecutorService	writeQ = Executors.newSingleThreadExecutor();
+	private 		Properties      connectProps;
+
 	
-	// Main read loop
-	// TODO: what happens if we error and bomb out of the loop? 
-	// We need a way to restart under control.
+	// Main loop (which runs on its own thread). 
+	// Handles reading input OR connecting to the server depending 
+	// on the state of the socket.
 	private final 	Runnable		reader = new Runnable() {
 		@Override
 		public void run() {
 			while (isRunning.get()) {
-				try {
-					decoder.decode();
-				} catch (SocketTimeoutException ste) {
-					continue;
-				} catch (Exception e) {
-					cb.errorOccurred(e);
-					if (!checkConnection()) {
-						break;
-					}
+				if (socketOpen.get()) {
+					handleInput(); 
+				}
+				
+				// Try to connect if we aren't connected.
+				else {
+					handleConnection();
 				}
 			}
 		}
 	};
+
 	
 	/**
 	 * Public API methods
 	 */
 
-	public MQTTClient(String host, int port, String clientId, ExecutorService pool, MQTTCallback listener) {
+	/**
+	 * 
+	 * @param host hostname of MQTT server
+	 * @param port port of MQTT server
+	 * @param clientId ID of this client
+	 * @param workPool a thread pool for decoding tasks, or null if synchronous required
+	 * @param outPool a single-threaded ThreadPoolExecutor for socket output tasks, or null if synchronous required
+	 * @param listener the callback to notify of events
+	 */
+	public MQTTClient(String host, int port, String clientId, Executor workPool, MQTTCallback listener) {
 		if (log.isLoggable(Level.FINER)) {
-			log.entering(getClass().getName(), "<INIT>", new Object[]{host, port, clientId, pool, listener});
+			log.entering(getClass().getName(), "<INIT>", new Object[]{host, port, clientId});
 		}
 		
 		// Validate arguments
@@ -104,81 +117,52 @@ public class MQTTClient extends MQTTDecoderListener {
 		if (listener == null)
 			throw new IllegalArgumentException("Listener cannot be null.");
 		this.cb = listener;
-
-		this.workQ = pool != null ? pool : Executors.newFixedThreadPool(
-				Runtime.getRuntime().availableProcessors());
+		
+		this.workQ = workPool;
 
 		log.exiting(getClass().getName(), "<INIT>");
 	}
 
+	public MQTTClient(String host, int port, String clientId, MQTTCallback listener) {
+		this(host, port, clientId, null, listener);
+	}
+	
 	public void connect() throws UnknownHostException, IOException {
 		connect(new Properties());
 	}
 
 	public void connect(Properties connectionProperties)
 			throws UnknownHostException, IOException {
-		if (log.isLoggable(Level.FINER)) {
-			log.entering(getClass().getName(), "connect", connectionProperties.toString());
-		}
+		log.entering(getClass().getName(), "connect", connectionProperties.toString());
 		
-		// Save our properties
-		String user = connectionProperties.getProperty("user");
-		String password = connectionProperties.getProperty("password");
-		String lwtTopic = connectionProperties.getProperty("lwtTopic");
-		String lwtMsg = connectionProperties.getProperty("lwtMsg", "MQTT client " + clientId + " is offline");
-		int lwtQos = Integer.parseInt(connectionProperties.getProperty("lwtQos", "0"));
-		boolean lwtRetain = Boolean.parseBoolean(connectionProperties.getProperty("lwtRetain", "False"));
-		boolean cleanSession = Boolean.parseBoolean(connectionProperties.getProperty("cleanSession", "False"));
-		// KeepAlive is stored as millis
-		this.keepAlive = Integer.parseInt(connectionProperties.getProperty("keepAliveSecs", "60")) * 1000; 
+		this.connectProps = connectionProperties;
+		openConnection(this.connectProps);
 
-		// Set up the TCP connection
-		socket = SocketFactory.getDefault().createSocket();
-		socket.setReceiveBufferSize(DEFAULT_BUFFER_SIZE);
-		socket.setSoTimeout(5000);
-		socket.connect(new InetSocketAddress(host, port));
-		
-		// Hand off the I/O streams to the decoder and encoder
-		InputStream in = new BufferedInputStream(socket.getInputStream());
-		OutputStream out = new BufferedOutputStream(socket.getOutputStream());
-		// Decoder also gets an executor service on which to execute decoding tasks
-		this.decoder = new MQTTDecoder(in, workQ, this);
-		this.encoder = new MQTTEncoder(out);
-
-		// Send the CONNECT msg
-		writeQ.submit(doConnect(user, password, lwtTopic, lwtMsg, lwtQos,
-				lwtRetain, cleanSession));
-
-		// Start the read loop so we can get the CONACK msg
+		// Start the main loop.
 		isRunning.set(true);
-		readQ.submit(reader);
+		new Thread(reader).start();
 		
 		// Start the activity check task
 		lastActivityCheck = System.currentTimeMillis();
-		pinger.schedule(new TimerTask() {
-			@Override
-			public void run() {
-				checkActivity();
-			}
-		}, 10000, 10000);
 		
 		log.exiting(getClass().getName(), "connect");
 	}
 
 	public void disconnect() {
-		if (isNetworkConnected()) {
-			isRunning.set(false);
-			pinger.cancel();
-			writeQ.submit(doDisconnect());
-			active = true;
-		}
+		log.entering(getClass().getName(), "disconnect");
+
+		isRunning.set(false);
+		writeQ.execute(doDisconnect());
+		active = true;
+
+		log.exiting(getClass().getName(), "disconnect");
 	}
 
 	public void subscribe(final String topicPattern, final int qos)
 			throws IOException {
 		int msgId = nextMessageId();
 		store.put(MQTTMessage.SUBSCRIBE, msgId, qos, topicPattern, null);
-		writeQ.submit(doSubscribe(topicPattern, qos, msgId));
+		writeQ.execute(doSubscribe(topicPattern, qos, msgId));
 		active = true;
 	}
 
@@ -190,7 +174,7 @@ public class MQTTClient extends MQTTDecoderListener {
 			store.put(MQTTMessage.PUBLISH, msgId, qos, topic, message);
 		}
 
-		writeQ.submit(doPublish(topic, message, qos, msgId));
+		writeQ.execute(doPublish(topic, message, qos, msgId));
 
 		active = true;
 		return msgId;
@@ -212,10 +196,6 @@ public class MQTTClient extends MQTTDecoderListener {
 		return socket != null && !socket.isClosed();
 	}
 
-	public boolean isMQTTConnected() {
-		return mqttConnected;
-	}
-
 	public int getPendingMessageCount() {
 		return store.count();
 	}
@@ -232,16 +212,24 @@ public class MQTTClient extends MQTTDecoderListener {
 		active = true;
 
 		if (responseCode == 0) {
-			mqttConnected = true;
+			log.info("Connected to " + this.host + ":" + this.port + " with ID " + this.clientId);
 			cb.onConnected();
 		}
 
 		else {
-			cb.errorOccurred(new MQTTClientException(responseCode > 0
-					&& responseCode <= 5 ? CONNECTION_ERRMSG[responseCode - 1]
-					: CONNECTION_ERRMSG[5] + responseCode));
-			checkConnection();
+			Exception e = new MQTTClientException(responseCode > 0 && responseCode <= 5 
+					? CONNECTION_ERRMSG[responseCode - 1]
+					: CONNECTION_ERRMSG[5] + responseCode);
+			cb.errorOccurred(e);
+			log.severe(e.getMessage());
 		}
+	}
+	
+	
+
+	@Override
+	protected void onDisconnect() {
+		cb.errorOccurred(new IllegalStateException("Server sent disconnect"));
 	}
 
 	@Override
@@ -274,11 +262,11 @@ public class MQTTClient extends MQTTDecoderListener {
 			store.put(MQTTMessage.PUBACK, messageId, qos, topic, payload);
 			cb.messageArrived(topic, payload);
 			store.delete(messageId);
-			writeQ.submit(doPubAck(messageId));
+			writeQ.execute(doPubAck(messageId));
 			break;
 		case 2:
 			store.put(MQTTMessage.PUBREC, messageId, qos, topic, payload);
-			writeQ.submit(doPubRec(messageId));
+			writeQ.execute(doPubRec(messageId));
 			break;
 		default:
 			cb.errorOccurred(new MQTTClientException(MQTT_INVALID_QOS + qos));
@@ -309,7 +297,7 @@ public class MQTTClient extends MQTTDecoderListener {
 		active = true;
 		if (store.contains(messageId)) {
 //			MQTTMessage msg = store.get(messageId);
-			writeQ.submit(doPubRel(messageId));
+			writeQ.execute(doPubRel(messageId));
 		}
 	}
 
@@ -319,7 +307,7 @@ public class MQTTClient extends MQTTDecoderListener {
 		if (store.contains(messageId)) {
 			MQTTMessage msg = store.get(messageId);
 			cb.messageArrived(msg.getTopic(), msg.getMsg());
-			writeQ.submit(doPubComp(messageId));
+			writeQ.execute(doPubComp(messageId));
 			store.delete(messageId);
 		}
 	}
@@ -338,11 +326,10 @@ public class MQTTClient extends MQTTDecoderListener {
 			@Override
 			public void run() {
 				try {
-					encoder.writeConnect(clientId, user, password, lwtTopic,
+					MQTTEncoder.writeConnect(getDataOutputStream(), clientId, user, password, lwtTopic,
 							lwtMsg, lwtQos, lwtRetain, cleanSession, (int) (keepAlive/1000));
 				} catch (IOException e) {
-					cb.errorOccurred(e);
-					checkConnection();
+					handleSocketError(e);
 				}
 			}
 		};
@@ -353,14 +340,14 @@ public class MQTTClient extends MQTTDecoderListener {
 			@Override
 			public void run() {
 				try {
-					encoder.writeDisconnect();
-					mqttConnected = false;
-//					writeQ.shutdown();
+					MQTTEncoder.writeDisconnect(getDataOutputStream());
 					socket.close();
+					socket = null;
+					socketOpen.set(false);
+					writeQ.shutdown();
 				} catch (IOException e) {
-					cb.errorOccurred(e);
-					checkConnection();
-				}
+					handleSocketError(e);
+				} 
 			}
 		};
 	}
@@ -371,10 +358,9 @@ public class MQTTClient extends MQTTDecoderListener {
 			@Override
 			public void run() {
 				try {
-					encoder.writeSubscribe(msgId, topicPattern, qos);
+					MQTTEncoder.writeSubscribe(getDataOutputStream(), msgId, topicPattern, qos);
 				} catch (IOException e) {
-					cb.errorOccurred(e);
-					checkConnection();
+					handleSocketError(e);
 				}
 			}
 		};
@@ -386,10 +372,9 @@ public class MQTTClient extends MQTTDecoderListener {
 			@Override
 			public void run() {
 				try {
-					encoder.writePublish(topic, message, msgId, qos);
+					MQTTEncoder.writePublish(getDataOutputStream(), topic, message, msgId, qos, false);
 				} catch (IOException e) {
-					cb.errorOccurred(e);
-					checkConnection();
+					handleSocketError(e);
 				}
 			}
 		};
@@ -400,10 +385,9 @@ public class MQTTClient extends MQTTDecoderListener {
 			@Override
 			public void run() {
 				try {
-					encoder.writePubComp(messageId);
+					MQTTEncoder.writePubComp(getDataOutputStream(), messageId);
 				} catch (IOException e) {
-					cb.errorOccurred(e);
-					checkConnection();
+					handleSocketError(e);
 				}
 			}
 		};
@@ -414,10 +398,9 @@ public class MQTTClient extends MQTTDecoderListener {
 			@Override
 			public void run() {
 				try {
-					encoder.writePubRec(messageId);
+					MQTTEncoder.writePubRec(getDataOutputStream(), messageId);
 				} catch (IOException e) {
-					cb.errorOccurred(e);
-					checkConnection();
+					handleSocketError(e);
 				}
 			}
 		};
@@ -428,10 +411,9 @@ public class MQTTClient extends MQTTDecoderListener {
 			@Override
 			public void run() {
 				try {
-					encoder.writePubRel(messageId);
+					MQTTEncoder.writePubRel(getDataOutputStream(), messageId);
 				} catch (IOException e) {
-					cb.errorOccurred(e);
-					checkConnection();
+					handleSocketError(e);
 				}
 			}
 		};
@@ -442,10 +424,9 @@ public class MQTTClient extends MQTTDecoderListener {
 			@Override
 			public void run() {
 				try {
-					encoder.writePubAck(messageId);
+					MQTTEncoder.writePubAck(getDataOutputStream(), messageId);
 				} catch (IOException e) {
-					cb.errorOccurred(e);
-					checkConnection();
+					handleSocketError(e);
 				}
 			}
 		};
@@ -456,10 +437,9 @@ public class MQTTClient extends MQTTDecoderListener {
 			@Override
 			public void run() {
 				try {
-					encoder.writePing();
+					MQTTEncoder.writePing(getDataOutputStream());
 				} catch (IOException e) {
-					cb.errorOccurred(e);
-					checkConnection();
+					handleSocketError(e);
 				}
 			}
 		};
@@ -469,21 +449,40 @@ public class MQTTClient extends MQTTDecoderListener {
 	 * Private helper methods follow ... 
 	 * ====================================================
 	 */
-
-	/**
-	 * Check whether we are still connected at the TCP level.
-	 * Notify callback if not
-	 * @return whether we are TCP-connected or not.
-	 */
-	private boolean checkConnection() {
-		if (!isNetworkConnected()) {
-			cb.connectionLost();
-			return false;
+	
+	private void openConnection(Properties connectionProperties) throws IOException, SocketException {
+		if (socket != null) {
+			try {
+				socket.close();
+			} catch (Exception e) {}
 		}
+		// Set up the TCP connection
+		socket = SocketFactory.getDefault().createSocket();
+		socket.setReceiveBufferSize(DEFAULT_BUFFER_SIZE);
+		socket.setSoTimeout(SOCKET_TIMEOUT);
+		socket.connect(new InetSocketAddress(host, port));
 		
-		else {
-			return true;
-		}
+		input = new BufferedInputStream(socket.getInputStream());
+		output = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
+		socketOpen.set(true);
+		
+		// Save our properties
+		String user = connectionProperties.getProperty("user");
+		String password = connectionProperties.getProperty("password");
+		String lwtTopic = connectionProperties.getProperty("lwtTopic");
+		String lwtMsg = connectionProperties.getProperty("lwtMsg", "MQTT client " + clientId + " is offline");
+		int lwtQos = Integer.parseInt(connectionProperties.getProperty("lwtQos", "0"));
+		boolean lwtRetain = Boolean.parseBoolean(connectionProperties.getProperty("lwtRetain", "False"));
+		boolean cleanSession = Boolean.parseBoolean(connectionProperties.getProperty("cleanSession", "False"));
+		// KeepAlive is stored as millis
+		this.keepAlive = Integer.parseInt(connectionProperties.getProperty("keepAliveSecs", "60")) * 1000; 
+		this.reconnectIntervalInc = Integer.parseInt(connectionProperties.getProperty("reconnectIntervalInc", "3")) * 1000;
+		this.reconnectIntervalMax = Integer.parseInt(connectionProperties.getProperty("reconnectIntervalMax", "120")) * 1000;
+
+		// Send the CONNECT msg
+		writeQ.execute(doConnect(user, password, lwtTopic, lwtMsg, lwtQos,
+				lwtRetain, cleanSession));
+
 	}
 
 	/**
@@ -515,12 +514,51 @@ public class MQTTClient extends MQTTDecoderListener {
 		long now = System.currentTimeMillis(); 
 		if (now - lastActivityCheck > keepAlive) {
 			// Time to check for activity
-			if (!active && checkConnection()) {
-				writeQ.submit(doPing());
+			if (!active && socketOpen.get()) {
+				writeQ.execute(doPing());
 			}
 			lastActivityCheck = now;
 			active = false;
 		}
 	}
 
+	private DataOutputStream getDataOutputStream() {
+		return output;
+	}
+
+	private void handleSocketError(Exception e) {
+		socketOpen.set(false);
+		this.reconnectInterval = 0L;
+		if (isRunning.get()) {
+			log.severe(e.getMessage());
+			cb.errorOccurred(e);
+			cb.connectionLost();
+		}
+	}
+
+	private void handleInput() {
+		try {
+			MQTTDecoder.decode(input, this, workQ);
+		} catch (SocketTimeoutException ste) {
+			checkActivity();
+		} catch (IOException ioe) {
+			handleSocketError(ioe);
+		}
+	}
+
+	private void handleConnection() {
+		try {
+			openConnection(connectProps);
+		} catch (IOException e) {
+			if (log.isLoggable(Level.FINE)) {
+				log.fine(e.getMessage());
+			}
+			try {
+				if (this.reconnectInterval < this.reconnectIntervalMax) {
+					this.reconnectInterval += this.reconnectIntervalInc;
+				}
+				Thread.sleep(this.reconnectInterval);
+			} catch (InterruptedException e1) { /* nop */ }
+		}
+	}
 }

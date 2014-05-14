@@ -1,6 +1,7 @@
 package thinqtt;
 
 
+
 public class MQTTMessage {
 	public static final int RESERVED0 	= 0;
 	public static final int CONNECT 	= 1;
@@ -24,6 +25,8 @@ public class MQTTMessage {
 	private final int qos;
 	private final String topic;
 	private final byte[] msg;
+	private final long time;
+	private int retries;
 	
 	public MQTTMessage(int type, int id, int qos, String topic, byte[] msg) {
 		this.type = type;
@@ -31,6 +34,8 @@ public class MQTTMessage {
 		this.qos = qos;
 		this.topic = topic;
 		this.msg = msg;
+		this.time = System.currentTimeMillis();
+		this.retries = 0;
 	}
 
 	public int getQos() {
@@ -51,6 +56,10 @@ public class MQTTMessage {
 
 	public byte[] getMsg() {
 		return msg;
+	}
+
+	public long getTime() {
+		return time;
 	}
 
 }

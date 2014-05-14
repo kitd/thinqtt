@@ -57,8 +57,7 @@ public class TestConnect {
 			}
 		};
 
-		final MQTTClient client = new MQTTClient("localhost", 1883, null,
-				null, listener);
+		final MQTTClient client = new MQTTClient("localhost", 1883, "myClient", listener);
 		try {
 			// Properties p = new Properties();
 			// p.setProperty("keepAliveSecs", "10");
