@@ -6,8 +6,8 @@ import java.util.Map;
 public class MQTTMessageStore {
 	private final Map<Integer, MQTTMessage> store = new HashMap<>();
 	
-	public void put(int type, int id, int qos, String topic, byte[] msg) {
-		store.put(id, new MQTTMessage(type, id, qos, topic, msg));
+	public void put(int type, int id, int qos, String topic, byte[] msg, boolean retained) {
+		store.put(id, new MQTTMessage(type, id, qos, topic, msg, retained));
 	}
 
 	public MQTTMessage get(int id) {

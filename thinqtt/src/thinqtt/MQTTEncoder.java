@@ -93,7 +93,8 @@ public class MQTTEncoder {
 		dos.flush();
 	}
 
-	public static void writePublish(DataOutputStream dos, String topic, byte[] message, int msgId, int qos, boolean dup)
+	public static void writePublish(DataOutputStream dos, String topic, byte[] message, int msgId, 
+			int qos, boolean retain)
 			throws IOException {
 		ByteArrayOutputStream payload = new ByteArrayOutputStream();
 		DataOutputStream dos2 = new DataOutputStream(payload);
@@ -103,7 +104,7 @@ public class MQTTEncoder {
 		}
 		dos2.write(message);
 
-		writeFixedHeader(dos, MQTTMessage.PUBLISH, dup, qos, false);
+		writeFixedHeader(dos, MQTTMessage.PUBLISH, false, qos, retain);
 		writeRemainingLength(dos, payload.size());
 		payload.writeTo(dos);
 		dos.flush();
@@ -119,7 +120,7 @@ public class MQTTEncoder {
 //				writeConnAck(dos);
 //				break;
 			case MQTTMessage.PUBLISH:
-				writePublish(dos, msg.getTopic(), msg.getMsg(), msg.getId(), msg.getQos(), true);
+				writePublish(dos, msg.getTopic(), msg.getMsg(), msg.getId(), msg.getQos(), msg.isRetained());
 				break;
 			case MQTTMessage.PUBACK:
 				writePubAck(dos, msg.getId());
@@ -155,7 +156,7 @@ public class MQTTEncoder {
 				writeDisconnect(dos);
 				break;
 			default:
-				throw new MQTTClientException("unknown message type: " + msg.getType());
+				throw new MQTTException("unknown message type: " + msg.getType());
 			}
 		} catch (IOException e) {
 			e.printStackTrace();

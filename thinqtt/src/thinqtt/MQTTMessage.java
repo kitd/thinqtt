@@ -26,9 +26,10 @@ public class MQTTMessage {
 	private final String topic;
 	private final byte[] msg;
 	private final long time;
+	private final boolean retain;
 	private int retries;
 	
-	public MQTTMessage(int type, int id, int qos, String topic, byte[] msg) {
+	public MQTTMessage(int type, int id, int qos, String topic, byte[] msg, boolean retain) {
 		this.type = type;
 		this.id = id;
 		this.qos = qos;
@@ -36,6 +37,11 @@ public class MQTTMessage {
 		this.msg = msg;
 		this.time = System.currentTimeMillis();
 		this.retries = 0;
+		this.retain = retain;
+	}
+
+	public boolean isRetained() {
+		return retain;
 	}
 
 	public int getQos() {

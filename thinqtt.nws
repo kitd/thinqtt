@@ -1,0 +1,33 @@
+<NotepadPlus>
+    <Project name="Test">
+        <Folder name="thinqtt">
+            <Folder name=".settings">
+                <File name="thinqtt\.settings\org.eclipse.jdt.core.prefs" />
+            </Folder>
+            <Folder name="src">
+                <Folder name="thinqtt">
+                    <File name="thinqtt\src\thinqtt\MQTTCallback.java" />
+                    <File name="thinqtt\src\thinqtt\MQTTClient.java" />
+                    <File name="thinqtt\src\thinqtt\MQTTDecoder.java" />
+                    <File name="thinqtt\src\thinqtt\MQTTDecoderListener.java" />
+                    <File name="thinqtt\src\thinqtt\MQTTEncoder.java" />
+                    <File name="thinqtt\src\thinqtt\MQTTException.java" />
+                    <File name="thinqtt\src\thinqtt\MQTTMessage.java" />
+                    <File name="thinqtt\src\thinqtt\MQTTMessageStore.java" />
+                </Folder>
+                <File name="thinqtt\src\c" />
+            </Folder>
+            <Folder name="tests">
+                <Folder name="thinqtt">
+                    <Folder name="tests">
+                        <File name="thinqtt\tests\thinqtt\tests\Firehose.java" />
+                        <File name="thinqtt\tests\thinqtt\tests\FirehosePaho.java" />
+                        <File name="thinqtt\tests\thinqtt\tests\TestConnect.java" />
+                    </Folder>
+                </Folder>
+            </Folder>
+            <File name="thinqtt\.classpath" />
+            <File name="thinqtt\.project" />
+        </Folder>
+    </Project>
+</NotepadPlus>

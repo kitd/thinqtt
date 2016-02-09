@@ -1,18 +1,18 @@
 package thinqtt;
 
-public class MQTTClientException extends RuntimeException {
+public class MQTTException extends RuntimeException {
 
 	/**
 	 * 
 	 */
 	private static final long serialVersionUID = 8028309890447101001L;
 
-	public MQTTClientException(String message, Throwable cause) {
+	public MQTTException(String message, Throwable cause) {
 		super(message, cause);
 		// TODO Auto-generated constructor stub
 	}
 
-	public MQTTClientException(String message) {
+	public MQTTException(String message) {
 		super(message);
 		// TODO Auto-generated constructor stub
 	}

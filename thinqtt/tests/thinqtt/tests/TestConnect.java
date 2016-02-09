@@ -3,6 +3,7 @@ package thinqtt.tests;
 import static org.junit.Assert.*;
 
 import java.io.UnsupportedEncodingException;
+import java.net.URI;
 
 import org.junit.Test;
 
@@ -57,7 +58,7 @@ public class TestConnect {
 			}
 		};
 
-		final MQTTClient client = new MQTTClient("localhost", 1883, "myClient", listener);
+		final MQTTClient client = new MQTTClient(URI.create("tcp://localhost:1883"), "myClient", listener);
 		try {
 			// Properties p = new Properties();
 			// p.setProperty("keepAliveSecs", "10");

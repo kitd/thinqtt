@@ -2,8 +2,8 @@ package thinqtt;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
+import java.io.EOFException;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.SocketException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -11,9 +11,13 @@ import java.util.concurrent.Executor;
 
 public class MQTTDecoder {
 	
-	public static void decode(InputStream is, final MQTTDecoderListener listener, Executor exec) throws IOException {
-		final int fixedHeader = is.read();
-		if (fixedHeader == -1) throw new SocketException("EOF on input stream");
+	public static void decode(DataInputStream dis, final MQTTDecoderListener listener, Executor exec) throws IOException {
+		final int fixedHeader;
+		try {
+			fixedHeader = dis.readByte();
+		} catch (EOFException e) {
+			return;
+		}
 		
 		// ALGORITHM FOR DECODING REMAINING LENGTH (from MQTT spec)
 		// multiplier = 1
@@ -28,14 +32,14 @@ public class MQTTDecoder {
 		int multiplier = 1;
 		int digit;
 		do {
-			digit = is.read();
+			digit = dis.readByte();
 			if (digit == -1) throw new SocketException("EOF on input stream");
 			remainingLength += (digit & 0x007F) * multiplier;
 			multiplier *= 128;
 		} while ((digit & 0x0080) != 0);
 
 		final byte[] payload = new byte[remainingLength];
-		readFully(is, payload);
+		dis.readFully(payload);
 		
 		if (exec != null) {
 			exec.execute(new Runnable() {
@@ -105,22 +109,10 @@ public class MQTTDecoder {
 				readDisconnect(listener);
 				break;
 			default:
-				throw new MQTTClientException("unknown message type: " + messageType);
+				throw new MQTTException("unknown message type: " + messageType);
 			}
 		} catch (IOException e) {
 			e.printStackTrace();
-		}
-	}
-
-	private static void readFully(InputStream is, byte[] buffer) throws IOException {
-		int start = 0;
-		int lengthToRead = buffer.length;
-		
-		while (lengthToRead > 0) {
-			int countRead = is.read(buffer, start, lengthToRead);
-			if (countRead < 0) break;
-			start = start + countRead;
-			lengthToRead = lengthToRead - countRead;
 		}
 	}
 
