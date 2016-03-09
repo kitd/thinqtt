@@ -43,7 +43,7 @@ public class MQTTClient extends MQTTDecoderListener {
 	private final 	URI 			uri;
 	private final 	String 			clientId;
 	private final 	MQTTCallback 	cb;
-	private final 	MQTTMessageStore store = new MQTTMessageStore();
+	private final 	MQTTMessageStore store = new MQTTMessageStore.InMemory();
 	private 		MQTTMessage		retainedMsg;
 	private 		Socket 			socket;
 	private 		DataInputStream input;
